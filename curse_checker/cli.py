@@ -133,6 +133,37 @@ def cmd_explain(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_compare(args: argparse.Namespace) -> int:
+    """节点对比命令"""
+    try:
+        script = _load_script(args.input)
+    except Exception as e:
+        print(f"❌ 加载剧本失败: {e}", file=sys.stderr)
+        return 1
+
+    if len(args.nodes) != 2:
+        print("❌ compare 命令需要恰好两个节点 ID", file=sys.stderr)
+        return 1
+
+    try:
+        analyzer = ScriptAnalyzer(script)
+        compare_report = analyzer.compare_nodes(args.nodes[0], args.nodes[1])
+        formatter = ReportFormatter(script)
+        output = formatter.format_compare_report(compare_report)
+    except Exception as e:
+        print(f"❌ 对比节点失败: {e}", file=sys.stderr)
+        return 1
+
+    if args.output:
+        with open(args.output, 'w', encoding='utf-8') as f:
+            f.write(output)
+        print(f"✅ 对比报告已写入: {args.output}")
+    else:
+        print(output)
+
+    return 0
+
+
 def _load_script(path: str):
     """加载剧本文件或目录"""
     parser = ScriptParser()
@@ -163,6 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
   curse-checker playthrough script.txt -n 5 --seed 42
   curse-checker explain script.txt node_id   # 解释节点可达性
   curse-checker explain script.txt n1 n2 n3  # 解释多个节点
+  curse-checker compare script.txt n1 n2     # 对比两个节点的可达性差异
         """
     )
 
@@ -224,6 +256,16 @@ def build_parser() -> argparse.ArgumentParser:
     explain_parser.add_argument("node", nargs="+", help="要分析的节点ID（可多个）")
     explain_parser.add_argument("-o", "--output", help="输出到文件")
     explain_parser.set_defaults(func=cmd_explain)
+
+    # compare 命令
+    compare_parser = subparsers.add_parser(
+        "compare",
+        help="对比两个节点的可达路线和诅咒状态差异"
+    )
+    compare_parser.add_argument("input", help="剧本文件或目录路径")
+    compare_parser.add_argument("nodes", nargs=2, help="要对比的两个节点ID")
+    compare_parser.add_argument("-o", "--output", help="输出到文件")
+    compare_parser.set_defaults(func=cmd_compare)
 
     return parser
 

@@ -4,7 +4,7 @@
 
 from typing import Dict, List
 
-from .analyzer import AnalysisReport
+from .analyzer import AnalysisReport, CompareReport
 from .models import RhythmType, Script
 from .path_generator import GeneratedPlaythrough, PathSummary
 from .rhythm import RhythmReport
@@ -273,29 +273,33 @@ class ReportFormatter:
         lines.append("")
 
         if report.is_reachable:
-            lines.append(f"✅ 节点可达 ({len(report.entry_points)} 条入口路线)")
+            grouped = self._group_entry_points(report.entry_points)
+            total = sum(len(entries) for entries in grouped.values())
+            lines.append(f"✅ 节点可达 ({total} 条入口路线)")
             lines.append("-" * 70)
             lines.append("")
 
-            for i, entry in enumerate(report.entry_points, 1):
-                lines.append(f"【路线 {i}】")
+            route_num = 1
+            for group_key, entries in grouped.items():
+                source_label = group_key
+                lines.append(f"📂 来自 {source_label}")
+                for entry in entries:
+                    lines.append(f"  【路线 {route_num}】")
+                    if entry.via_choice_id:
+                        lines.append(f"    选项: [{entry.via_choice_id}] {entry.via_choice_text}")
+                    else:
+                        lines.append(f"    方式: 自动跳转")
 
-                if entry.via_choice_id:
-                    lines.append(f"  来源: {entry.from_node_title} ({entry.from_node_id})")
-                    lines.append(f"  选项: [{entry.via_choice_id}] {entry.via_choice_text}")
-                else:
-                    lines.append(f"  来源: {entry.from_node_title} ({entry.from_node_id})")
-                    lines.append(f"  方式: 自动跳转")
+                    if entry.entry_state:
+                        state_parts = []
+                        for curse, level in sorted(entry.entry_state.items()):
+                            state_parts.append(f"{curse} Lv.{level}")
+                        lines.append(f"    进入状态: {', '.join(state_parts)}")
+                    else:
+                        lines.append(f"    进入状态: 无诅咒（清净状态）")
 
-                if entry.entry_state:
-                    state_parts = []
-                    for curse, level in sorted(entry.entry_state.items()):
-                        state_parts.append(f"{curse} Lv.{level}")
-                    lines.append(f"  进入状态: {', '.join(state_parts)}")
-                else:
-                    lines.append(f"  进入状态: 无诅咒（清净状态）")
-
-                lines.append("")
+                    lines.append("")
+                    route_num += 1
 
         else:
             lines.append(f"❌ 节点不可达")
@@ -319,5 +323,115 @@ class ReportFormatter:
             if not report.nearest_reachable_nodes and not report.blocked_reasons:
                 lines.append("  没有找到通往该节点的任何路径")
                 lines.append("")
+
+        return "\n".join(lines)
+
+    def _group_entry_points(self, entry_points) -> dict:
+        """按来源节点和选项分组入口路线"""
+        from collections import OrderedDict
+        grouped = OrderedDict()
+        for entry in entry_points:
+            if entry.via_choice_id:
+                key = f"{entry.from_node_title} ({entry.from_node_id}) -> [{entry.via_choice_id}] {entry.via_choice_text}"
+            else:
+                key = f"{entry.from_node_title} ({entry.from_node_id}) [自动跳转]"
+            if key not in grouped:
+                grouped[key] = []
+            grouped[key].append(entry)
+        return grouped
+
+    def format_compare_report(self, report: CompareReport) -> str:
+        """格式化节点对比报告"""
+        lines: List[str] = []
+
+        lines.append("=" * 70)
+        lines.append(f"  节点对比分析")
+        lines.append("=" * 70)
+        lines.append("")
+
+        lines.append(f"📌 对比节点")
+        lines.append("-" * 70)
+        a_status = "✅ 可达" if report.a_reachable else "❌ 不可达"
+        b_status = "✅ 可达" if report.b_reachable else "❌ 不可达"
+        lines.append(f"  A: {report.node_a_title} ({report.node_a_id}) - {a_status} ({report.a_entry_count} 条入口)")
+        lines.append(f"  B: {report.node_b_title} ({report.node_b_id}) - {b_status} ({report.b_entry_count} 条入口)")
+        lines.append("")
+
+        if report.a_reachable != report.b_reachable:
+            lines.append(f"⚠️  可达性差异")
+            lines.append("-" * 70)
+            if report.a_reachable and not report.b_reachable:
+                lines.append(f"  A 可达但 B 不可达 - B 的阻断原因:")
+                for reason in report.b_blocked_reasons[:3]:
+                    lines.append(f"    • {reason}")
+            else:
+                lines.append(f"  B 可达但 A 不可达 - A 的阻断原因:")
+                for reason in report.a_blocked_reasons[:3]:
+                    lines.append(f"    • {reason}")
+            lines.append("")
+
+        lines.append(f"📊 诅咒状态差异")
+        lines.append("-" * 70)
+        if report.curse_diff_notes:
+            for note in report.curse_diff_notes:
+                lines.append(f"  • {note}")
+        else:
+            all_curses = sorted(set(
+                list(report.a_state_summary.keys()) + list(report.b_state_summary.keys())
+            ))
+            if not all_curses:
+                lines.append(f"  两个节点均无诅咒状态")
+            else:
+                lines.append(f"  两个节点的诅咒可达状态完全相同")
+                for curse in all_curses:
+                    a_levels = report.a_state_summary.get(curse, [])
+                    b_levels = report.b_state_summary.get(curse, [])
+                    a_str = ", ".join(f"Lv.{l}" for l in a_levels) if a_levels else "无"
+                    lines.append(f"    {curse}: [{a_str}]")
+        lines.append("")
+
+        lines.append(f"🗺️  来源节点差异")
+        lines.append("-" * 70)
+        if report.shared_sources:
+            source_titles = []
+            for nid in report.shared_sources:
+                n = self.script.get_node(nid)
+                source_titles.append(n.title if n and n.title else nid)
+            lines.append(f"  共同来源: {', '.join(source_titles)}")
+        else:
+            lines.append(f"  共同来源: 无")
+
+        if report.a_only_sources:
+            source_titles = []
+            for nid in report.a_only_sources:
+                n = self.script.get_node(nid)
+                source_titles.append(n.title if n and n.title else nid)
+            lines.append(f"  仅 A 的来源: {', '.join(source_titles)}")
+
+        if report.b_only_sources:
+            source_titles = []
+            for nid in report.b_only_sources:
+                n = self.script.get_node(nid)
+                source_titles.append(n.title if n and n.title else nid)
+            lines.append(f"  仅 B 的来源: {', '.join(source_titles)}")
+
+        if not report.a_only_sources and not report.b_only_sources and not report.shared_sources:
+            lines.append(f"  两个节点均无可达入口")
+
+        lines.append("")
+
+        if not report.a_reachable:
+            lines.append(f"❌ A 不可达的阻断详情")
+            lines.append("-" * 70)
+            for reason in report.a_blocked_reasons:
+                lines.append(f"  • {reason}")
+            lines.append("")
+
+        if not report.b_reachable:
+            lines.append(f"❌ B 不可达的阻断详情")
+            lines.append("-" * 70)
+            for reason in report.b_blocked_reasons:
+                lines.append(f"  • {reason}")
+            lines.append("")
 
         return "\n".join(lines)

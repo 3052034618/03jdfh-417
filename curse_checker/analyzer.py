@@ -88,6 +88,27 @@ class NodeExplainReport:
     node_conditions: List[str] = field(default_factory=list)
 
 
+@dataclass
+class CompareReport:
+    """两个节点的可达性对比报告"""
+    node_a_id: str
+    node_a_title: str
+    node_b_id: str
+    node_b_title: str
+    a_reachable: bool
+    b_reachable: bool
+    a_entry_count: int
+    b_entry_count: int
+    a_state_summary: Dict[str, List[int]] = field(default_factory=dict)
+    b_state_summary: Dict[str, List[int]] = field(default_factory=dict)
+    shared_sources: List[str] = field(default_factory=list)
+    a_only_sources: List[str] = field(default_factory=list)
+    b_only_sources: List[str] = field(default_factory=list)
+    a_blocked_reasons: List[str] = field(default_factory=list)
+    b_blocked_reasons: List[str] = field(default_factory=list)
+    curse_diff_notes: List[str] = field(default_factory=list)
+
+
 class CurseState:
     """诅咒状态"""
 
@@ -197,7 +218,7 @@ class ScriptAnalyzer:
     def analyze(self) -> AnalysisReport:
         """执行完整分析"""
         self._analyze_reachability()
-        self._analyze_dead_choices()
+        self._analyze_dead_choices_from_reachability()
         self._analyze_curse_usage()
         self._analyze_ending_conflicts()
         return self.report
@@ -264,6 +285,8 @@ class ScriptAnalyzer:
                         reachable_with_state[node.next_node].append(new_curse_state)
                         queue.append((node.next_node, new_curse_state))
 
+        self._reachable_with_state = reachable_with_state
+
         for node_id, node in self.script.all_nodes.items():
             if node_id not in reachable_with_state or not reachable_with_state[node_id]:
                 nearest = []
@@ -328,10 +351,12 @@ class ScriptAnalyzer:
                     blocked_reasons=reasons
                 ))
 
-        self._reachable_with_state = reachable_with_state
-
     def explain_node(self, target_node_id: str) -> NodeExplainReport:
-        """解释指定节点的可达性，列出所有入口路线和诅咒状态"""
+        """解释指定节点的可达性，列出所有入口路线和诅咒状态
+
+        不对同状态入口去重，保留所有实际入口路线，方便作者
+        对照剧本逐条检查。
+        """
         target_node = self.script.get_node(target_node_id)
         if not target_node:
             return NodeExplainReport(
@@ -343,13 +368,11 @@ class ScriptAnalyzer:
                 blocked_reasons=["节点不存在"]
             )
 
-        # 重新执行可达性分析，同时记录入口信息
         reachable_with_state: Dict[str, List[Tuple[CurseState, str, Optional[str], Optional[str]]]] = defaultdict(list)
-        # 格式: node_id -> [(state, from_node_id, via_choice_id, via_choice_text)]
         queue: deque = deque()
         max_iterations = 10000
         iterations = 0
-        max_states_per_node = 50
+        max_entries_per_node = 200
 
         for start_node in self.script.get_start_nodes():
             initial_state = CurseState()
@@ -391,7 +414,7 @@ class ScriptAnalyzer:
                             if self._states_are_equivalent(existing_state, choice_curse_state):
                                 state_exists = True
                                 break
-                        if not state_exists and len(reachable_with_state[choice.target_node]) < max_states_per_node:
+                        if not state_exists and len(reachable_with_state[choice.target_node]) < max_entries_per_node:
                             reachable_with_state[choice.target_node].append(
                                 (choice_curse_state, node_id, choice.id, choice.text)
                             )
@@ -405,28 +428,77 @@ class ScriptAnalyzer:
                         if self._states_are_equivalent(existing_state, new_curse_state):
                             state_exists = True
                             break
-                    if not state_exists and len(reachable_with_state[node.next_node]) < max_states_per_node:
+                    if not state_exists and len(reachable_with_state[node.next_node]) < max_entries_per_node:
                         reachable_with_state[node.next_node].append(
                             (new_curse_state, node_id, None, None)
                         )
                         queue.append((node.next_node, new_curse_state, node_id, None, None))
 
-        # 构建报告
         is_reachable = target_node_id in reachable_with_state and bool(reachable_with_state[target_node_id])
 
         entry_points: List[EntryPoint] = []
+        seen_entries: Set[tuple] = set()
         if is_reachable:
-            for state, from_id, choice_id, choice_text in reachable_with_state[target_node_id]:
-                from_node = self.script.get_node(from_id) if from_id else None
-                entry_points.append(EntryPoint(
-                    from_node_id=from_id or "(起点)",
-                    from_node_title=from_node.title if from_node and from_node.title else from_id or "(起点)",
-                    via_choice_id=choice_id,
-                    via_choice_text=choice_text,
-                    entry_state=dict(state.curses)
-                ))
+            target_entries = reachable_with_state[target_node_id]
 
-        # 节点自身的进入条件
+            if target_node.is_start:
+                for state, from_id, choice_id, choice_text in target_entries:
+                    key = ("(起点)", None, tuple(sorted(state.curses.items())))
+                    if key not in seen_entries:
+                        seen_entries.add(key)
+                        entry_points.append(EntryPoint(
+                            from_node_id="(起点)",
+                            from_node_title="(起点)",
+                            via_choice_id=None,
+                            via_choice_text=None,
+                            entry_state=dict(state.curses)
+                        ))
+
+            for src_node in self.script.all_nodes.values():
+                if src_node.id == target_node_id:
+                    continue
+                for choice in src_node.choices:
+                    if choice.target_node != target_node_id:
+                        continue
+                    for state, _, _, _ in reachable_with_state.get(src_node.id, []):
+                        ns = state.copy()
+                        for eff in src_node.curse_effects:
+                            ns.apply_effect(eff)
+                        if ns.check_conditions(choice.conditions):
+                            cs = ns.copy()
+                            for eff in choice.curse_effects:
+                                cs.apply_effect(eff)
+                            cs = self._normalize_state(cs)
+                            if cs.check_conditions(target_node.conditions):
+                                key = (src_node.id, choice.id, tuple(sorted(cs.curses.items())))
+                                if key not in seen_entries:
+                                    seen_entries.add(key)
+                                    entry_points.append(EntryPoint(
+                                        from_node_id=src_node.id,
+                                        from_node_title=src_node.title or src_node.id,
+                                        via_choice_id=choice.id,
+                                        via_choice_text=choice.text,
+                                        entry_state=dict(cs.curses)
+                                    ))
+
+                if src_node.next_node == target_node_id:
+                    for state, _, _, _ in reachable_with_state.get(src_node.id, []):
+                        ns = state.copy()
+                        for eff in src_node.curse_effects:
+                            ns.apply_effect(eff)
+                        ns = self._normalize_state(ns)
+                        if ns.check_conditions(target_node.conditions):
+                            key = (src_node.id, None, tuple(sorted(ns.curses.items())))
+                            if key not in seen_entries:
+                                seen_entries.add(key)
+                                entry_points.append(EntryPoint(
+                                    from_node_id=src_node.id,
+                                    from_node_title=src_node.title or src_node.id,
+                                    via_choice_id=None,
+                                    via_choice_text=None,
+                                    entry_state=dict(ns.curses)
+                                ))
+
         node_conditions = []
         for cond in target_node.conditions:
             if cond.required:
@@ -441,56 +513,57 @@ class ScriptAnalyzer:
             else:
                 node_conditions.append(f"{cond.curse_name} 不存在")
 
-        # 不可达时找最近的可达节点
         blocked_reasons = []
         nearest = []
         if not is_reachable:
-            # 找出所有指向目标节点，但自身可达的节点
             for node in self.script.all_nodes.values():
                 if node.id not in reachable_with_state or not reachable_with_state[node.id]:
                     continue
-                # 检查选项
                 for choice in node.choices:
                     if choice.target_node == target_node_id:
                         nearest.append(node.id)
-                        # 分析为什么过不去
                         for state, _, _, _ in reachable_with_state[node.id]:
-                            node_state = state.copy()
-                            for effect in node.curse_effects:
-                                node_state.apply_effect(effect)
-                            if not node_state.check_conditions(choice.conditions):
-                                conds = []
+                            ns = state.copy()
+                            for eff in node.curse_effects:
+                                ns.apply_effect(eff)
+                            if not ns.check_conditions(choice.conditions):
+                                failed_conds = []
                                 for c in choice.conditions:
-                                    conds.append(self._format_condition(c))
+                                    if not ns.check_condition(c):
+                                        failed_conds.append(self._format_condition(c))
                                 blocked_reasons.append(
-                                    f"从 {node.title or node.id} 选择「{choice.text}」时，选项条件不满足: {', '.join(conds)}"
+                                    f"从 {node.title or node.id} 选择「{choice.text}」时，"
+                                    f"选项条件不满足: {', '.join(failed_conds)}"
                                 )
                                 break
                             else:
-                                choice_state = node_state.copy()
-                                for effect in choice.curse_effects:
-                                    choice_state.apply_effect(effect)
-                                if not choice_state.check_conditions(target_node.conditions):
-                                    conds = []
+                                cs = ns.copy()
+                                for eff in choice.curse_effects:
+                                    cs.apply_effect(eff)
+                                if not cs.check_conditions(target_node.conditions):
+                                    failed_conds = []
                                     for c in target_node.conditions:
-                                        conds.append(self._format_condition(c))
+                                        if not cs.check_condition(c):
+                                            failed_conds.append(self._format_condition(c))
                                     blocked_reasons.append(
-                                        f"从 {node.title or node.id} 选择「{choice.text}」后，目标节点条件不满足: {', '.join(conds)}"
+                                        f"从 {node.title or node.id} 选择「{choice.text}」后，"
+                                        f"卡在目标节点条件: {', '.join(failed_conds)}"
                                     )
                                     break
-                # 检查自动跳转
                 if node.next_node == target_node_id:
                     nearest.append(node.id)
                     for state, _, _, _ in reachable_with_state[node.id]:
-                        node_state = state.copy()
-                        for effect in node.curse_effects:
-                            node_state.apply_effect(effect)
-                        if not node_state.check_conditions(target_node.conditions):
-                            conds = []
+                        ns = state.copy()
+                        for eff in node.curse_effects:
+                            ns.apply_effect(eff)
+                        if not ns.check_conditions(target_node.conditions):
+                            failed_conds = []
                             for c in target_node.conditions:
-                                conds.append(self._format_condition(c))
+                                if not ns.check_condition(c):
+                                    failed_conds.append(self._format_condition(c))
                             blocked_reasons.append(
-                                f"从 {node.title or node.id} 自动跳转后，目标节点条件不满足: {', '.join(conds)}"
+                                f"从 {node.title or node.id} 自动跳转后，"
+                                f"卡在目标节点条件: {', '.join(failed_conds)}"
                             )
                             break
 
@@ -521,90 +594,90 @@ class ScriptAnalyzer:
             return f"需要 {cond.curse_name} 不存在"
 
     def _explain_why_blocked(self, src_node: Node, choice: Choice, target_node: Node) -> str:
-        """解释为什么从源节点通过某个选项无法到达目标节点"""
-        # 先检查选项条件
-        if choice.conditions:
-            choice_conds = [self._format_condition(c) for c in choice.conditions]
-            return f"选项条件不满足（{', '.join(choice_conds)}）"
+        """解释为什么从源节点通过某个选项无法到达目标节点
 
-        # 再检查目标节点条件
-        if target_node.conditions:
-            target_conds = [self._format_condition(c) for c in target_node.conditions]
-            return f"目标节点条件不满足（{', '.join(target_conds)}）"
+        逐条检查选项条件和目标节点条件，给出精确的阻断位置。
+        """
+        src_states = self._reachable_with_state.get(src_node.id, [])
+
+        choice_cond_blockers = []
+        for cond in choice.conditions:
+            any_pass = False
+            for state in src_states:
+                ns = state.copy()
+                for eff in src_node.curse_effects:
+                    ns.apply_effect(eff)
+                if ns.check_condition(cond):
+                    any_pass = True
+                    break
+            if not any_pass:
+                choice_cond_blockers.append(self._format_condition(cond))
+
+        if choice_cond_blockers:
+            return f"选项条件不满足（{', '.join(choice_cond_blockers)}）"
+
+        target_cond_blockers = []
+        for cond in target_node.conditions:
+            any_pass = False
+            for state in src_states:
+                ns = state.copy()
+                for eff in src_node.curse_effects:
+                    ns.apply_effect(eff)
+                if not ns.check_conditions(choice.conditions):
+                    continue
+                cs = ns.copy()
+                for eff in choice.curse_effects:
+                    cs.apply_effect(eff)
+                if cs.check_condition(cond):
+                    any_pass = True
+                    break
+            if not any_pass:
+                target_cond_blockers.append(self._format_condition(cond))
+
+        if target_cond_blockers:
+            return f"目标节点条件不满足（{', '.join(target_cond_blockers)}）"
 
         return "原因未知"
 
-    def _analyze_dead_choices(self) -> None:
-        """分析永远无法到达的选项"""
-        reachable_with_state: Dict[str, List[CurseState]] = defaultdict(list)
-        queue: deque = deque()
-        max_iterations = 10000
-        iterations = 0
-        max_states_per_node = 50
+    def _analyze_dead_choices_from_reachability(self) -> None:
+        """基于可达性分析结果，判断死选项
 
-        for start_node in self.script.get_start_nodes():
-            initial_state = CurseState()
-            if initial_state.check_conditions(start_node.conditions):
-                reachable_with_state[start_node.id].append(initial_state)
-                queue.append((start_node.id, initial_state))
-
-        while queue and iterations < max_iterations:
-            iterations += 1
-            node_id, curse_state = queue.popleft()
-            node = self.script.get_node(node_id)
-            if not node:
-                continue
-
-            new_curse_state = curse_state.copy()
-            for effect in node.curse_effects:
-                new_curse_state.apply_effect(effect)
-
-            for choice in node.choices:
-                if new_curse_state.check_conditions(choice.conditions):
-                    choice_curse_state = new_curse_state.copy()
-                    for effect in choice.curse_effects:
-                        choice_curse_state.apply_effect(effect)
-
-                    target_node = self.script.get_node(choice.target_node)
-                    if not target_node or not choice_curse_state.check_conditions(target_node.conditions):
-                        continue
-
-                    state_exists = False
-                    for existing_state in reachable_with_state[choice.target_node]:
-                        if self._states_are_compatible(existing_state, choice_curse_state):
-                            state_exists = True
-                            break
-
-                    if not state_exists and len(reachable_with_state[choice.target_node]) < max_states_per_node:
-                        reachable_with_state[choice.target_node].append(choice_curse_state)
-                        queue.append((choice.target_node, choice_curse_state))
-
-            if node.next_node:
-                target_node = self.script.get_node(node.next_node)
-                if target_node and new_curse_state.check_conditions(target_node.conditions):
-                    state_exists = False
-                    for existing_state in reachable_with_state[node.next_node]:
-                        if self._states_are_compatible(existing_state, new_curse_state):
-                            state_exists = True
-                            break
-
-                    if not state_exists and len(reachable_with_state[node.next_node]) < max_states_per_node:
-                        reachable_with_state[node.next_node].append(new_curse_state)
-                        queue.append((node.next_node, new_curse_state))
+        核心逻辑：遍历每个节点的每个选项，检查该节点是否有任何
+        可达的诅咒状态能让该选项的条件满足。只要有一条可达状态
+        能通过选项条件，该选项就不算死选项。
+        """
+        if not hasattr(self, '_reachable_with_state'):
+            return
 
         for node_id, node in self.script.all_nodes.items():
-            for choice in node.choices:
-                is_reachable = False
-                for curse_state in reachable_with_state.get(node_id, []):
-                    node_curse_state = curse_state.copy()
-                    for effect in node.curse_effects:
-                        node_curse_state.apply_effect(effect)
-                    if node_curse_state.check_conditions(choice.conditions):
-                        is_reachable = True
-                        break
+            states = self._reachable_with_state.get(node_id, [])
+            if not states:
+                for choice in node.choices:
+                    self.report.dead_choices.append(DeadChoice(
+                        node_id=node_id,
+                        choice_id=choice.id,
+                        text=choice.text,
+                        reason="父节点本身不可达"
+                    ))
+                continue
 
-                if not is_reachable:
-                    reason = self._explain_unreachable_choice(node, choice)
+            for choice in node.choices:
+                any_state_can_choose = False
+                choice_block_details = []
+
+                for state in states:
+                    node_state = state.copy()
+                    for effect in node.curse_effects:
+                        node_state.apply_effect(effect)
+
+                    if not node_state.check_conditions(choice.conditions):
+                        continue
+
+                    any_state_can_choose = True
+                    break
+
+                if not any_state_can_choose:
+                    reason = self._explain_dead_choice_detail(node, choice)
                     self.report.dead_choices.append(DeadChoice(
                         node_id=node_id,
                         choice_id=choice.id,
@@ -612,24 +685,32 @@ class ScriptAnalyzer:
                         reason=reason
                     ))
 
-    def _explain_unreachable_choice(self, node: Node, choice: Choice) -> str:
-        """解释为什么选项不可达"""
+    def _explain_dead_choice_detail(self, node: Node, choice: Choice) -> str:
+        """详细解释为什么选项是死选项，区分选项条件 vs 目标节点条件"""
+        states = self._reachable_with_state.get(node.id, [])
+        if not states:
+            return "父节点本身不可达"
+
         if not choice.conditions:
             return "父节点本身不可达"
 
-        reasons = []
+        unsatisfied = []
         for cond in choice.conditions:
-            if cond.required:
-                if cond.max_level is not None:
-                    reasons.append(f"需要 {cond.curse_name} <= {cond.max_level}")
-                elif cond.min_level > 1:
-                    reasons.append(f"需要 {cond.curse_name} >= {cond.min_level}")
-                else:
-                    reasons.append(f"需要 {cond.curse_name} 存在")
-            else:
-                reasons.append(f"需要 {cond.curse_name} 不存在")
+            any_can_pass = False
+            for state in states:
+                node_state = state.copy()
+                for effect in node.curse_effects:
+                    node_state.apply_effect(effect)
+                if node_state.check_condition(cond):
+                    any_can_pass = True
+                    break
+            if not any_can_pass:
+                unsatisfied.append(self._format_condition(cond))
 
-        return "条件无法满足: " + ", ".join(reasons)
+        if unsatisfied:
+            return "选项条件无法满足: " + ", ".join(unsatisfied)
+
+        return "选项条件看起来可满足，但组合后无法通过"
 
     def _states_are_compatible(self, s1: CurseState, s2: CurseState) -> bool:
         """检查 s1 是否完全覆盖 s2（s1 能满足所有 s2 能满足的条件，且更多）
@@ -867,3 +948,69 @@ class ScriptAnalyzer:
                         )
 
         return None
+
+    def compare_nodes(self, node_a_id: str, node_b_id: str) -> CompareReport:
+        """对比两个节点的可达路线和进入诅咒状态差异"""
+        node_a = self.script.get_node(node_a_id)
+        node_b = self.script.get_node(node_b_id)
+
+        report_a = self.explain_node(node_a_id)
+        report_b = self.explain_node(node_b_id)
+
+        a_state_summary: Dict[str, List[int]] = defaultdict(list)
+        for ep in report_a.entry_points:
+            for curse, level in ep.entry_state.items():
+                a_state_summary[curse].append(level)
+        for curse in a_state_summary:
+            a_state_summary[curse] = sorted(set(a_state_summary[curse]))
+
+        b_state_summary: Dict[str, List[int]] = defaultdict(list)
+        for ep in report_b.entry_points:
+            for curse, level in ep.entry_state.items():
+                b_state_summary[curse].append(level)
+        for curse in b_state_summary:
+            b_state_summary[curse] = sorted(set(b_state_summary[curse]))
+
+        a_sources = set()
+        for ep in report_a.entry_points:
+            a_sources.add(ep.from_node_id)
+
+        b_sources = set()
+        for ep in report_b.entry_points:
+            b_sources.add(ep.from_node_id)
+
+        shared = sorted(a_sources & b_sources)
+        a_only = sorted(a_sources - b_sources)
+        b_only = sorted(b_sources - a_sources)
+
+        curse_diff_notes = []
+        all_curses = sorted(set(list(a_state_summary.keys()) + list(b_state_summary.keys())))
+        for curse in all_curses:
+            a_levels = a_state_summary.get(curse, [])
+            b_levels = b_state_summary.get(curse, [])
+            if a_levels != b_levels:
+                a_str = ", ".join(f"Lv.{l}" for l in a_levels) if a_levels else "无"
+                b_str = ", ".join(f"Lv.{l}" for l in b_levels) if b_levels else "无"
+                curse_diff_notes.append(f"{curse}: A 可达状态 [{a_str}] vs B 可达状态 [{b_str}]")
+
+        a_blocked = report_a.blocked_reasons[:5] if not report_a.is_reachable else []
+        b_blocked = report_b.blocked_reasons[:5] if not report_b.is_reachable else []
+
+        return CompareReport(
+            node_a_id=node_a_id,
+            node_a_title=report_a.node_title,
+            node_b_id=node_b_id,
+            node_b_title=report_b.node_title,
+            a_reachable=report_a.is_reachable,
+            b_reachable=report_b.is_reachable,
+            a_entry_count=len(report_a.entry_points),
+            b_entry_count=len(report_b.entry_points),
+            a_state_summary=dict(a_state_summary),
+            b_state_summary=dict(b_state_summary),
+            shared_sources=shared,
+            a_only_sources=a_only,
+            b_only_sources=b_only,
+            a_blocked_reasons=a_blocked,
+            b_blocked_reasons=b_blocked,
+            curse_diff_notes=curse_diff_notes
+        )
