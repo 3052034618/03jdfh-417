@@ -125,16 +125,20 @@ class ScriptAnalyzer:
 
     def _analyze_reachability(self) -> None:
         """分析节点可达性"""
-        reachable: Set[str] = set()
+        reachable_with_state: Dict[str, List[CurseState]] = defaultdict(list)
         queue: deque = deque()
+        max_iterations = 10000
+        iterations = 0
+        max_states_per_node = 50
 
         for start_node in self.script.get_start_nodes():
-            if start_node.id not in reachable:
-                if CurseState().check_conditions(start_node.conditions):
-                    reachable.add(start_node.id)
-                    queue.append((start_node.id, CurseState()))
+            initial_state = CurseState()
+            if initial_state.check_conditions(start_node.conditions):
+                reachable_with_state[start_node.id].append(initial_state)
+                queue.append((start_node.id, initial_state))
 
-        while queue:
+        while queue and iterations < max_iterations:
+            iterations += 1
             node_id, curse_state = queue.popleft()
             node = self.script.get_node(node_id)
             if not node:
@@ -151,19 +155,29 @@ class ScriptAnalyzer:
                         choice_curse_state.apply_effect(effect)
                     target_node = self.script.get_node(choice.target_node)
                     if target_node and choice_curse_state.check_conditions(target_node.conditions):
-                        if choice.target_node not in reachable:
-                            reachable.add(choice.target_node)
+                        state_exists = False
+                        for existing_state in reachable_with_state[choice.target_node]:
+                            if self._states_are_compatible(existing_state, choice_curse_state):
+                                state_exists = True
+                                break
+                        if not state_exists and len(reachable_with_state[choice.target_node]) < max_states_per_node:
+                            reachable_with_state[choice.target_node].append(choice_curse_state)
                             queue.append((choice.target_node, choice_curse_state))
 
             if node.next_node:
                 target_node = self.script.get_node(node.next_node)
                 if target_node and new_curse_state.check_conditions(target_node.conditions):
-                    if node.next_node not in reachable:
-                        reachable.add(node.next_node)
+                    state_exists = False
+                    for existing_state in reachable_with_state[node.next_node]:
+                        if self._states_are_compatible(existing_state, new_curse_state):
+                            state_exists = True
+                            break
+                    if not state_exists and len(reachable_with_state[node.next_node]) < max_states_per_node:
+                        reachable_with_state[node.next_node].append(new_curse_state)
                         queue.append((node.next_node, new_curse_state))
 
         for node_id, node in self.script.all_nodes.items():
-            if node_id not in reachable:
+            if node_id not in reachable_with_state or not reachable_with_state[node_id]:
                 self.report.unreachable_nodes.append(UnreachableNode(
                     node_id=node_id,
                     title=node.title or node_id,
@@ -279,23 +293,31 @@ class ScriptAnalyzer:
         curse_set_by: Dict[str, List[str]] = defaultdict(list)
         curse_checked_in: Dict[str, List[str]] = defaultdict(list)
         curse_effective_in: Dict[str, List[str]] = defaultdict(list)
+        all_curse_names: Set[str] = set()
 
         for node_id, node in self.script.all_nodes.items():
             for effect in node.curse_effects:
                 curse_set_by[effect.name].append(f"节点:{node_id}")
+                all_curse_names.add(effect.name)
 
             for cond in node.conditions:
                 curse_checked_in[cond.curse_name].append(f"节点条件:{node_id}")
+                all_curse_names.add(cond.curse_name)
+                if self._is_effective_node_condition(cond, node):
+                    curse_effective_in[cond.curse_name].append(f"节点:{node_id}")
 
             for choice in node.choices:
                 for effect in choice.curse_effects:
                     curse_set_by[effect.name].append(f"选项:{node_id}.{choice.id}")
+                    all_curse_names.add(effect.name)
                 for cond in choice.conditions:
                     curse_checked_in[cond.curse_name].append(f"选项条件:{node_id}.{choice.id}")
-                    if self._is_effective_condition(cond, node, choice):
+                    all_curse_names.add(cond.curse_name)
+                    if self._is_effective_choice_condition(cond, node, choice):
                         curse_effective_in[cond.curse_name].append(f"{node_id}.{choice.id}")
 
-        for curse_name, description in self.script.curse_definitions.items():
+        for curse_name in all_curse_names:
+            description = self.script.curse_definitions.get(curse_name, "(未定义的诅咒)")
             never_checked = curse_name not in curse_checked_in
             never_effective = curse_name not in curse_effective_in
 
@@ -308,8 +330,18 @@ class ScriptAnalyzer:
                     never_effective=never_effective
                 ))
 
-    def _is_effective_condition(self, cond: Condition, node: Node, choice: Choice) -> bool:
-        """判断条件是否真正影响了剧情走向"""
+    def _is_effective_node_condition(self, cond: Condition, node: Node) -> bool:
+        """判断节点进入条件是否真正影响了剧情走向"""
+        if node.is_start:
+            return True
+        if node.is_ending:
+            return True
+        if node.conditions and len(node.conditions) >= 1:
+            return True
+        return False
+
+    def _is_effective_choice_condition(self, cond: Condition, node: Node, choice: Choice) -> bool:
+        """判断选项条件是否真正影响了剧情走向"""
         if not node.choices:
             return False
 

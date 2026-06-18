@@ -1,0 +1,118 @@
+# 测试场景3: 综合测试 - 所有选项格式
+
+* [镜中影] 镜中的倒影
+* [门后低语] 走廊的低语声
+
+## 第一章: 选项格式全测试
+
+### start
+@开始
+@节奏: 平静
+@标题: 开始房间
+
+测试所有选项格式是否能正确解析：
+
+- [simple] 简单选项，无特殊效果 -> room_simple
+- [cond]? 镜中影 带条件的选项 -> room_cond
+- [add]> +镜中影 选择后增加诅咒 -> room_add
+- [remove]> -门后低语 选择后解除诅咒 -> room_remove
+- [increase]> ++镜中影 选择后诅咒升级 -> room_increase
+- [decrease]> --门后低语 选择后诅咒降级 -> room_decrease
+- [both]? 镜中影> +门后低语 带条件和增加诅咒 -> room_both
+- [neg]? !门后低语> -镜中影 带否定条件和解除诅咒 -> room_neg
+- [multi]> +镜中影> +门后低语 选择后加两个诅咒 -> room_multi
+- ![mislead] 这是一个误导选项 -> ending_mislead
+
+### room_simple
+@节奏: 平静
+@标题: 简单房间
+-> ending_normal
+
+### room_cond
+@节奏: 平静
+@标题: 条件房间
+-> ending_normal
+
+### room_add
+@节奏: 平静
+@标题: 加诅咒房间
+-> ending_normal
+
+### room_remove
+@节奏: 平静
+@标题: 减诅咒房间
+-> ending_normal
+
+### room_increase
+@节奏: 平静
+@标题: 升级房间
+-> ending_normal
+
+### room_decrease
+@节奏: 平静
+@标题: 降级房间
+-> ending_normal
+
+### room_both
+@节奏: 平静
+@标题: 条件加效果房间
+-> ending_normal
+
+### room_neg
+@节奏: 平静
+@标题: 否定条件房间
+-> ending_normal
+
+### room_multi
+@节奏: 平静
+@标题: 多效果房间
+-> ending_normal
+
+### ending_normal
+@结局
+@节奏: 平静
+@标题: 普通结局
+
+### ending_mislead
+@结局
+@节奏: 异常
+@标题: 误导结局
+
+## 第二章: 诅咒效果全测试
+
+### effect_start
+@开始
+@节奏: 平静
+@标题: 效果测试开始
+
+> +镜中影
+> +门后低语
+
+- [e1] 去检查 -> effect_check
+
+### effect_check
+@节奏: 平静
+@标题: 效果检查
+
+? 镜中影
+? 门后低语
+
+> --镜中影
+> -门后低语
+> ++新诅咒X
+
+- [e2] 最终检查 -> effect_final
+
+### effect_final
+@节奏: 揭露
+@标题: 最终检查
+
+? 新诅咒X>=1
+? !门后低语
+
+-> ending_effect
+
+### ending_effect
+@结局
+@节奏: 揭露
+@标题: 效果测试结局

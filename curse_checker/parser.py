@@ -335,23 +335,28 @@ class ScriptParser:
         conditions: List[Condition] = []
         curse_effects: List[CurseEffect] = []
 
-        # 解析条件和诅咒效果
+        # 用正则表达式匹配条件和诅咒效果
+        # 条件模式: ? 后面跟条件表达式（包含比较运算符 >=|<=|==|!=|>|<）
+        # 诅咒效果模式: > 后面跟 +、-、++、-- 开头的效果，效果名不含 >
+        cond_pattern = re.compile(r'^\?\s*(!?[^\s>=<!]+(?:\s*(?:>=|<=|==|!=|[><])\s*\d+)?)\s*(.*)$')
+        effect_pattern = re.compile(r'^>\s*([+-]{1,2}[^>\s]+)\s*(.*)$')
+
         while remaining:
-            if remaining.startswith('?'):
-                # 找到下一个空格或>或->
-                space_idx = remaining.find(' ', 1)
-                if space_idx == -1:
+            cond_match = cond_pattern.match(remaining)
+            effect_match = effect_pattern.match(remaining)
+
+            if cond_match and (not effect_match or cond_match.start() < effect_match.start()):
+                cond_str = cond_match.group(1).strip()
+                if not cond_str:
                     raise ParseError("选项条件格式错误", self.line_number, line)
-                cond_str = remaining[1:space_idx].strip()
                 conditions.append(self._parse_single_condition(cond_str, line))
-                remaining = remaining[space_idx + 1:].strip()
-            elif remaining.startswith('>'):
-                space_idx = remaining.find(' ', 1)
-                if space_idx == -1:
+                remaining = cond_match.group(2).strip()
+            elif effect_match:
+                effect_str = effect_match.group(1).strip()
+                if not effect_str:
                     raise ParseError("选项诅咒效果格式错误", self.line_number, line)
-                effect_str = remaining[1:space_idx].strip()
                 curse_effects.append(self._parse_single_curse_effect(effect_str, line))
-                remaining = remaining[space_idx + 1:].strip()
+                remaining = effect_match.group(2).strip()
             else:
                 break
 
