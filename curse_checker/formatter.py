@@ -4,7 +4,7 @@
 
 from typing import Dict, List
 
-from .analyzer import AnalysisReport, CompareReport
+from .analyzer import AnalysisReport, CompareReport, TraceReport
 from .models import RhythmType, Script
 from .path_generator import GeneratedPlaythrough, PathSummary
 from .rhythm import RhythmReport
@@ -420,6 +420,43 @@ class ReportFormatter:
 
         lines.append("")
 
+        if report.shared_choice_routes or report.a_only_choice_routes or report.b_only_choice_routes:
+            lines.append(f"🔀 选项级路线差异")
+            lines.append("-" * 70)
+            if report.shared_choice_routes:
+                lines.append(f"  A/B 共有的路线:")
+                for r in report.shared_choice_routes:
+                    lines.append(f"    • {r}")
+            if report.a_only_choice_routes:
+                lines.append(f"  仅 A 的路线:")
+                for r in report.a_only_choice_routes:
+                    lines.append(f"    • {r}")
+            if report.b_only_choice_routes:
+                lines.append(f"  仅 B 的路线:")
+                for r in report.b_only_choice_routes:
+                    lines.append(f"    • {r}")
+            lines.append("")
+
+        if report.a_routes:
+            lines.append(f"📍 A 的入口路线详情")
+            lines.append("-" * 70)
+            for i, route in enumerate(report.a_routes, 1):
+                choice_desc = f"[{route.via_choice_id}] {route.via_choice_text}" if route.via_choice_id else "(自动跳转)"
+                state_parts = [f"{cn} Lv.{lv}" for cn, lv in sorted(route.entry_state.items())] if route.entry_state else ["清净"]
+                lines.append(f"  {i}. {route.from_node_title} ({route.from_node_id}) via {choice_desc}")
+                lines.append(f"     进入状态: {', '.join(state_parts)}")
+            lines.append("")
+
+        if report.b_routes:
+            lines.append(f"📍 B 的入口路线详情")
+            lines.append("-" * 70)
+            for i, route in enumerate(report.b_routes, 1):
+                choice_desc = f"[{route.via_choice_id}] {route.via_choice_text}" if route.via_choice_id else "(自动跳转)"
+                state_parts = [f"{cn} Lv.{lv}" for cn, lv in sorted(route.entry_state.items())] if route.entry_state else ["清净"]
+                lines.append(f"  {i}. {route.from_node_title} ({route.from_node_id}) via {choice_desc}")
+                lines.append(f"     进入状态: {', '.join(state_parts)}")
+            lines.append("")
+
         if not report.a_reachable:
             lines.append(f"❌ A 不可达的阻断详情")
             lines.append("-" * 70)
@@ -432,6 +469,70 @@ class ReportFormatter:
             lines.append("-" * 70)
             for reason in report.b_blocked_reasons:
                 lines.append(f"  • {reason}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def format_trace_report(self, report: TraceReport) -> str:
+        lines: List[str] = []
+
+        lines.append("=" * 70)
+        lines.append(f"  路线追踪 - {report.target_node_title}")
+        lines.append("=" * 70)
+        lines.append("")
+
+        if report.target_reachable:
+            lines.append(f"✅ 目标节点可达 (找到 {len(report.successful_routes)} 条可行路线)")
+        else:
+            lines.append(f"❌ 目标节点不可达")
+        lines.append("")
+
+        if report.successful_routes:
+            lines.append(f"🛤️  可行路线 ({len(report.successful_routes)} 条)")
+            lines.append("=" * 70)
+            for i, route in enumerate(report.successful_routes, 1):
+                lines.append(f"")
+                lines.append(f"【路线 {i}】({len(route.steps)} 步)")
+                lines.append("-" * 50)
+                for step in route.steps:
+                    before_parts = [f"{cn}=Lv.{lv}" for cn, lv in sorted(step.curse_state_before.items())] if step.curse_state_before else ["清净"]
+                    after_parts = [f"{cn}=Lv.{lv}" for cn, lv in sorted(step.curse_state_after.items())] if step.curse_state_after else ["清净"]
+                    if step.choice_id:
+                        lines.append(f"  {step.node_title} ({step.node_id})")
+                        lines.append(f"    → 选择 [{step.choice_id}] {step.choice_text}")
+                    else:
+                        lines.append(f"  {step.node_title} ({step.node_id})")
+                        lines.append(f"    → 自动跳转")
+                    if step.curse_effects:
+                        lines.append(f"    诅咒效果: {', '.join(step.curse_effects)}")
+                    lines.append(f"    状态: {', '.join(before_parts)} → {', '.join(after_parts)}")
+            lines.append("")
+
+        if report.failed_routes:
+            lines.append(f"⚠️  失败路线 ({len(report.failed_routes)} 条)")
+            lines.append("=" * 70)
+            for i, route in enumerate(report.failed_routes, 1):
+                lines.append(f"")
+                lines.append(f"【失败路线 {i}】停在第 {len(route.steps)} 步")
+                lines.append("-" * 50)
+                for step in route.steps:
+                    before_parts = [f"{cn}=Lv.{lv}" for cn, lv in sorted(step.curse_state_before.items())] if step.curse_state_before else ["清净"]
+                    after_parts = [f"{cn}=Lv.{lv}" for cn, lv in sorted(step.curse_state_after.items())] if step.curse_state_after else ["清净"]
+                    if step.choice_id:
+                        lines.append(f"  {step.node_title} ({step.node_id})")
+                        lines.append(f"    → 选择 [{step.choice_id}] {step.choice_text}")
+                    else:
+                        lines.append(f"  {step.node_title} ({step.node_id})")
+                        lines.append(f"    → 自动跳转")
+                    if step.curse_effects:
+                        lines.append(f"    诅咒效果: {', '.join(step.curse_effects)}")
+                    lines.append(f"    状态: {', '.join(before_parts)} → {', '.join(after_parts)}")
+                if route.fail_reason:
+                    lines.append(f"  ❌ 阻断: {route.fail_reason}")
+            lines.append("")
+
+        if not report.successful_routes and not report.failed_routes:
+            lines.append("  没有找到任何通往目标的路线")
             lines.append("")
 
         return "\n".join(lines)

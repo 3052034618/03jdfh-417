@@ -89,6 +89,15 @@ class NodeExplainReport:
 
 
 @dataclass
+class RouteEntry:
+    from_node_id: str
+    from_node_title: str
+    via_choice_id: Optional[str]
+    via_choice_text: Optional[str]
+    entry_state: Dict[str, int]
+
+
+@dataclass
 class CompareReport:
     """两个节点的可达性对比报告"""
     node_a_id: str
@@ -107,6 +116,39 @@ class CompareReport:
     a_blocked_reasons: List[str] = field(default_factory=list)
     b_blocked_reasons: List[str] = field(default_factory=list)
     curse_diff_notes: List[str] = field(default_factory=list)
+    a_routes: List[RouteEntry] = field(default_factory=list)
+    b_routes: List[RouteEntry] = field(default_factory=list)
+    shared_choice_routes: List[str] = field(default_factory=list)
+    a_only_choice_routes: List[str] = field(default_factory=list)
+    b_only_choice_routes: List[str] = field(default_factory=list)
+
+
+@dataclass
+class TraceStep:
+    node_id: str
+    node_title: str
+    choice_id: Optional[str]
+    choice_text: Optional[str]
+    curse_state_before: Dict[str, int]
+    curse_effects: List[str]
+    curse_state_after: Dict[str, int]
+
+
+@dataclass
+class TraceRoute:
+    steps: List[TraceStep]
+    reached_target: bool
+    fail_step: Optional[str] = None
+    fail_reason: Optional[str] = None
+
+
+@dataclass
+class TraceReport:
+    target_node_id: str
+    target_node_title: str
+    target_reachable: bool
+    successful_routes: List[TraceRoute]
+    failed_routes: List[TraceRoute]
 
 
 class CurseState:
@@ -545,9 +587,11 @@ class ScriptAnalyzer:
                                     for c in target_node.conditions:
                                         if not cs.check_condition(c):
                                             failed_conds.append(self._format_condition(c))
+                                    state_parts = [f"{cn}=Lv.{lv}" for cn, lv in sorted(cs.curses.items())]
+                                    state_desc = f" (当前 {' '.join(state_parts)})" if state_parts else ""
                                     blocked_reasons.append(
                                         f"从 {node.title or node.id} 选择「{choice.text}」后，"
-                                        f"卡在目标节点条件: {', '.join(failed_conds)}"
+                                        f"卡在目标节点条件: {', '.join(failed_conds)}{state_desc}"
                                     )
                                     break
                 if node.next_node == target_node_id:
@@ -561,9 +605,11 @@ class ScriptAnalyzer:
                             for c in target_node.conditions:
                                 if not ns.check_condition(c):
                                     failed_conds.append(self._format_condition(c))
+                            state_parts = [f"{cn}=Lv.{lv}" for cn, lv in sorted(ns.curses.items())]
+                            state_desc = f" (当前 {' '.join(state_parts)})" if state_parts else ""
                             blocked_reasons.append(
                                 f"从 {node.title or node.id} 自动跳转后，"
-                                f"卡在目标节点条件: {', '.join(failed_conds)}"
+                                f"卡在目标节点条件: {', '.join(failed_conds)}{state_desc}"
                             )
                             break
 
@@ -593,6 +639,17 @@ class ScriptAnalyzer:
         else:
             return f"需要 {cond.curse_name} 不存在"
 
+    def _format_effect(self, effect: CurseEffect) -> str:
+        if effect.operation == CurseOperation.ADD:
+            return f"+{effect.name}"
+        elif effect.operation == CurseOperation.REMOVE:
+            return f"-{effect.name}"
+        elif effect.operation == CurseOperation.INCREASE:
+            return f"++{effect.name}"
+        elif effect.operation == CurseOperation.DECREASE:
+            return f"--{effect.name}"
+        return f"{effect.name}"
+
     def _explain_why_blocked(self, src_node: Node, choice: Choice, target_node: Node) -> str:
         """解释为什么从源节点通过某个选项无法到达目标节点
 
@@ -617,25 +674,30 @@ class ScriptAnalyzer:
             return f"选项条件不满足（{', '.join(choice_cond_blockers)}）"
 
         target_cond_blockers = []
-        for cond in target_node.conditions:
-            any_pass = False
-            for state in src_states:
-                ns = state.copy()
-                for eff in src_node.curse_effects:
-                    ns.apply_effect(eff)
-                if not ns.check_conditions(choice.conditions):
-                    continue
-                cs = ns.copy()
-                for eff in choice.curse_effects:
-                    cs.apply_effect(eff)
-                if cs.check_condition(cond):
-                    any_pass = True
-                    break
-            if not any_pass:
-                target_cond_blockers.append(self._format_condition(cond))
+        representative_state = None
+        for state in src_states:
+            ns = state.copy()
+            for eff in src_node.curse_effects:
+                ns.apply_effect(eff)
+            if not ns.check_conditions(choice.conditions):
+                continue
+            cs = ns.copy()
+            for eff in choice.curse_effects:
+                cs.apply_effect(eff)
+            for cond in target_node.conditions:
+                if not cs.check_condition(cond):
+                    if self._format_condition(cond) not in target_cond_blockers:
+                        target_cond_blockers.append(self._format_condition(cond))
+                    if representative_state is None:
+                        representative_state = cs
 
         if target_cond_blockers:
-            return f"目标节点条件不满足（{', '.join(target_cond_blockers)}）"
+            state_desc = ""
+            if representative_state:
+                parts = [f"{cn}=Lv.{lv}" for cn, lv in sorted(representative_state.curses.items())]
+                if parts:
+                    state_desc = f" (当前 {' '.join(parts)})"
+            return f"目标节点条件不满足（{', '.join(target_cond_blockers)}）{state_desc}"
 
         return "原因未知"
 
@@ -996,6 +1058,65 @@ class ScriptAnalyzer:
         a_blocked = report_a.blocked_reasons[:5] if not report_a.is_reachable else []
         b_blocked = report_b.blocked_reasons[:5] if not report_b.is_reachable else []
 
+        a_routes = [
+            RouteEntry(
+                from_node_id=ep.from_node_id,
+                from_node_title=ep.from_node_title,
+                via_choice_id=ep.via_choice_id,
+                via_choice_text=ep.via_choice_text,
+                entry_state=dict(ep.entry_state)
+            )
+            for ep in report_a.entry_points
+        ]
+
+        b_routes = [
+            RouteEntry(
+                from_node_id=ep.from_node_id,
+                from_node_title=ep.from_node_title,
+                via_choice_id=ep.via_choice_id,
+                via_choice_text=ep.via_choice_text,
+                entry_state=dict(ep.entry_state)
+            )
+            for ep in report_b.entry_points
+        ]
+
+        def _route_key(re: RouteEntry) -> tuple:
+            return (re.from_node_id, re.via_choice_id)
+
+        a_choice_keys = {_route_key(r) for r in a_routes}
+        b_choice_keys = {_route_key(r) for r in b_routes}
+        shared_keys = a_choice_keys & b_choice_keys
+
+        def _format_route(re: RouteEntry) -> str:
+            if re.via_choice_id is not None:
+                choice_text = re.via_choice_text or ""
+                return f"{re.from_node_title or re.from_node_id} via [{re.via_choice_id}] {choice_text}"
+            return f"{re.from_node_title or re.from_node_id} (自动跳转)"
+
+        shared_choice_routes = []
+        seen_shared = set()
+        for r in a_routes:
+            k = _route_key(r)
+            if k in shared_keys and k not in seen_shared:
+                seen_shared.add(k)
+                shared_choice_routes.append(_format_route(r))
+
+        a_only_choice_routes = []
+        seen_a_only = set()
+        for r in a_routes:
+            k = _route_key(r)
+            if k not in shared_keys and k not in seen_a_only:
+                seen_a_only.add(k)
+                a_only_choice_routes.append(_format_route(r))
+
+        b_only_choice_routes = []
+        seen_b_only = set()
+        for r in b_routes:
+            k = _route_key(r)
+            if k not in shared_keys and k not in seen_b_only:
+                seen_b_only.add(k)
+                b_only_choice_routes.append(_format_route(r))
+
         return CompareReport(
             node_a_id=node_a_id,
             node_a_title=report_a.node_title,
@@ -1012,5 +1133,164 @@ class ScriptAnalyzer:
             b_only_sources=b_only,
             a_blocked_reasons=a_blocked,
             b_blocked_reasons=b_blocked,
-            curse_diff_notes=curse_diff_notes
+            curse_diff_notes=curse_diff_notes,
+            a_routes=a_routes,
+            b_routes=b_routes,
+            shared_choice_routes=shared_choice_routes,
+            a_only_choice_routes=a_only_choice_routes,
+            b_only_choice_routes=b_only_choice_routes
+        )
+
+    def trace_node(self, target_node_id: str, max_routes: int = 5) -> TraceReport:
+        target_node = self.script.get_node(target_node_id)
+        if not target_node:
+            return TraceReport(
+                target_node_id=target_node_id,
+                target_node_title="(不存在)",
+                target_reachable=False,
+                successful_routes=[],
+                failed_routes=[]
+            )
+
+        successful_routes: List[TraceRoute] = []
+        failed_routes: List[TraceRoute] = []
+
+        queue: deque = deque()
+        max_iterations = 10000
+        iterations = 0
+
+        for start_node in self.script.get_start_nodes():
+            initial_state = CurseState()
+            if initial_state.check_conditions(start_node.conditions):
+                norm_state = self._normalize_state(initial_state)
+                queue.append((start_node.id, norm_state, [], set()))
+
+        while queue and iterations < max_iterations:
+            iterations += 1
+            node_id, curse_state, path_so_far, visited = queue.popleft()
+
+            node = self.script.get_node(node_id)
+            if not node:
+                continue
+
+            norm_key = (node_id, tuple(sorted(curse_state.curses.items())))
+            if norm_key in visited:
+                continue
+            visited = visited | {norm_key}
+
+            state_before = dict(curse_state.curses)
+            new_curse_state = curse_state.copy()
+            for effect in node.curse_effects:
+                new_curse_state.apply_effect(effect)
+            new_curse_state = self._normalize_state(new_curse_state)
+            state_after_node = dict(new_curse_state.curses)
+            node_effects = [self._format_effect(e) for e in node.curse_effects]
+
+            for choice in node.choices:
+                choice_step = TraceStep(
+                    node_id=node_id,
+                    node_title=node.title or node_id,
+                    choice_id=choice.id,
+                    choice_text=choice.text,
+                    curse_state_before=state_before,
+                    curse_effects=node_effects + [self._format_effect(e) for e in choice.curse_effects],
+                    curse_state_after=state_after_node
+                )
+                new_path = path_so_far + [choice_step]
+
+                if not new_curse_state.check_conditions(choice.conditions):
+                    failed_conds = []
+                    for c in choice.conditions:
+                        if not new_curse_state.check_condition(c):
+                            failed_conds.append(self._format_condition(c))
+                    if len(failed_routes) < max_routes:
+                        failed_routes.append(TraceRoute(
+                            steps=new_path,
+                            reached_target=False,
+                            fail_step=node_id,
+                            fail_reason=f"选项 [{choice.id}] 条件不满足: {', '.join(failed_conds)}"
+                        ))
+                    continue
+
+                choice_curse_state = new_curse_state.copy()
+                for effect in choice.curse_effects:
+                    choice_curse_state.apply_effect(effect)
+                choice_curse_state = self._normalize_state(choice_curse_state)
+
+                choice_step.curse_effects = node_effects + [self._format_effect(e) for e in choice.curse_effects]
+                choice_step.curse_state_after = dict(choice_curse_state.curses)
+                new_path = path_so_far + [choice_step]
+
+                if choice.target_node == target_node_id:
+                    if choice_curse_state.check_conditions(target_node.conditions):
+                        if len(successful_routes) < max_routes:
+                            successful_routes.append(TraceRoute(
+                                steps=new_path,
+                                reached_target=True
+                            ))
+                    else:
+                        failed_conds = []
+                        for c in target_node.conditions:
+                            if not choice_curse_state.check_condition(c):
+                                current_val = choice_curse_state.curses.get(c.curse_name, 0)
+                                failed_conds.append(f"{self._format_condition(c)} (当前 {c.curse_name}={current_val})")
+                        if len(failed_routes) < max_routes:
+                            failed_routes.append(TraceRoute(
+                                steps=new_path,
+                                reached_target=False,
+                                fail_step=target_node_id,
+                                fail_reason=f"目标节点 {target_node_id} 条件不满足: {', '.join(failed_conds)}"
+                            ))
+                else:
+                    target = self.script.get_node(choice.target_node)
+                    if target and choice_curse_state.check_conditions(target.conditions):
+                        next_key = (choice.target_node, tuple(sorted(choice_curse_state.curses.items())))
+                        if next_key not in visited:
+                            queue.append((choice.target_node, choice_curse_state, new_path, visited))
+
+            if node.next_node:
+                auto_step = TraceStep(
+                    node_id=node_id,
+                    node_title=node.title or node_id,
+                    choice_id=None,
+                    choice_text=None,
+                    curse_state_before=state_before,
+                    curse_effects=node_effects,
+                    curse_state_after=state_after_node
+                )
+                new_path = path_so_far + [auto_step]
+
+                if node.next_node == target_node_id:
+                    if new_curse_state.check_conditions(target_node.conditions):
+                        if len(successful_routes) < max_routes:
+                            successful_routes.append(TraceRoute(
+                                steps=new_path,
+                                reached_target=True
+                            ))
+                    else:
+                        failed_conds = []
+                        for c in target_node.conditions:
+                            if not new_curse_state.check_condition(c):
+                                current_val = new_curse_state.curses.get(c.curse_name, 0)
+                                failed_conds.append(f"{self._format_condition(c)} (当前 {c.curse_name}={current_val})")
+                        if len(failed_routes) < max_routes:
+                            failed_routes.append(TraceRoute(
+                                steps=new_path,
+                                reached_target=False,
+                                fail_step=target_node_id,
+                                fail_reason=f"目标节点 {target_node_id} 条件不满足: {', '.join(failed_conds)}"
+                            ))
+                else:
+                    target = self.script.get_node(node.next_node)
+                    if target and new_curse_state.check_conditions(target.conditions):
+                        next_key = (node.next_node, tuple(sorted(new_curse_state.curses.items())))
+                        if next_key not in visited:
+                            queue.append((node.next_node, new_curse_state, new_path, visited))
+
+        return TraceReport(
+            target_node_id=target_node_id,
+            target_node_title=target_node.title or target_node_id,
+            target_reachable=len(successful_routes) > 0,
+            successful_routes=successful_routes[:max_routes],
+            failed_routes=failed_routes[:max_routes]
         )
