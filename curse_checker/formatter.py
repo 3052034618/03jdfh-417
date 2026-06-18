@@ -36,6 +36,18 @@ class ReportFormatter:
             lines.append("-" * 70)
             for node in report.unreachable_nodes:
                 lines.append(f"  [{node.chapter}] {node.node_id} - {node.title}")
+                if node.nearest_reachable:
+                    nearest_titles = []
+                    for nid in node.nearest_reachable[:3]:
+                        n = self.script.get_node(nid)
+                        if n and n.title:
+                            nearest_titles.append(n.title)
+                        else:
+                            nearest_titles.append(nid)
+                    lines.append(f"    ↳ 最近可达: {', '.join(nearest_titles)}")
+                if node.blocked_reasons:
+                    for reason in node.blocked_reasons[:2]:
+                        lines.append(f"    ↳ 阻断: {reason}")
             lines.append("")
 
         if report.dead_choices:
@@ -65,6 +77,14 @@ class ReportFormatter:
                     lines.append(f"    设置位置: {', '.join(curse.set_by[:3])}")
                     if len(curse.set_by) > 3:
                         lines.append(f"             等 {len(curse.set_by)} 处")
+                if curse.propagated_to:
+                    lines.append(f"    传播到: {', '.join(curse.propagated_to[:5])}")
+                    if len(curse.propagated_to) > 5:
+                        lines.append(f"             等 {len(curse.propagated_to)} 个节点")
+                    if curse.propagation_depth > 0:
+                        lines.append(f"    传播深度: 最远 {curse.propagation_depth} 跳")
+                else:
+                    lines.append(f"    传播到: 未传播到任何可达节点")
             lines.append("")
 
         if report.conflicting_endings:
@@ -231,3 +251,73 @@ class ReportFormatter:
             current = indent + current[break_pos + 1:].strip()
         result.append(current)
         return "\n".join(result)
+
+    def format_node_explain(self, report) -> str:
+        """格式化节点可达性解释报告"""
+        lines: List[str] = []
+
+        lines.append("=" * 70)
+        lines.append(f"  节点可达性分析 - {report.node_title}")
+        lines.append("=" * 70)
+        lines.append("")
+
+        lines.append(f"📌 节点信息")
+        lines.append("-" * 70)
+        lines.append(f"  ID: {report.node_id}")
+        lines.append(f"  章节: {report.chapter}")
+        lines.append(f"  类型: {'起始节点' if report.is_start else '普通节点'}")
+
+        if report.node_conditions:
+            lines.append(f"  进入条件: {', '.join(report.node_conditions)}")
+
+        lines.append("")
+
+        if report.is_reachable:
+            lines.append(f"✅ 节点可达 ({len(report.entry_points)} 条入口路线)")
+            lines.append("-" * 70)
+            lines.append("")
+
+            for i, entry in enumerate(report.entry_points, 1):
+                lines.append(f"【路线 {i}】")
+
+                if entry.via_choice_id:
+                    lines.append(f"  来源: {entry.from_node_title} ({entry.from_node_id})")
+                    lines.append(f"  选项: [{entry.via_choice_id}] {entry.via_choice_text}")
+                else:
+                    lines.append(f"  来源: {entry.from_node_title} ({entry.from_node_id})")
+                    lines.append(f"  方式: 自动跳转")
+
+                if entry.entry_state:
+                    state_parts = []
+                    for curse, level in sorted(entry.entry_state.items()):
+                        state_parts.append(f"{curse} Lv.{level}")
+                    lines.append(f"  进入状态: {', '.join(state_parts)}")
+                else:
+                    lines.append(f"  进入状态: 无诅咒（清净状态）")
+
+                lines.append("")
+
+        else:
+            lines.append(f"❌ 节点不可达")
+            lines.append("-" * 70)
+            lines.append("")
+
+            if report.nearest_reachable_nodes:
+                lines.append(f"  最近的可达节点 ({len(report.nearest_reachable_nodes)} 个):")
+                for nid in report.nearest_reachable_nodes[:5]:
+                    node = self.script.get_node(nid)
+                    title = node.title if node and node.title else nid
+                    lines.append(f"    • {title} ({nid})")
+                lines.append("")
+
+            if report.blocked_reasons:
+                lines.append(f"  阻断原因:")
+                for reason in report.blocked_reasons:
+                    lines.append(f"    • {reason}")
+                lines.append("")
+
+            if not report.nearest_reachable_nodes and not report.blocked_reasons:
+                lines.append("  没有找到通往该节点的任何路径")
+                lines.append("")
+
+        return "\n".join(lines)

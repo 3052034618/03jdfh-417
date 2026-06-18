@@ -98,6 +98,41 @@ def cmd_playthrough(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_explain(args: argparse.Namespace) -> int:
+    """节点可达性解释命令"""
+    try:
+        script = _load_script(args.input)
+    except Exception as e:
+        print(f"❌ 加载剧本失败: {e}", file=sys.stderr)
+        return 1
+
+    node_ids = args.node if isinstance(args.node, list) else [args.node]
+
+    from .analyzer import ScriptAnalyzer
+    try:
+        analyzer = ScriptAnalyzer(script)
+        formatter = ReportFormatter(script)
+
+        outputs = []
+        for nid in node_ids:
+            report = analyzer.explain_node(nid)
+            outputs.append(formatter.format_node_explain(report))
+
+        output = "\n".join(outputs)
+    except Exception as e:
+        print(f"❌ 分析节点失败: {e}", file=sys.stderr)
+        return 1
+
+    if args.output:
+        with open(args.output, 'w', encoding='utf-8') as f:
+            f.write(output)
+        print(f"✅ 节点分析报告已写入: {args.output}")
+    else:
+        print(output)
+
+    return 0
+
+
 def _load_script(path: str):
     """加载剧本文件或目录"""
     parser = ScriptParser()
@@ -126,6 +161,8 @@ def build_parser() -> argparse.ArgumentParser:
   curse-checker rhythm script.txt -o rhythm_report.txt
   curse-checker playthrough script.txt      # 生成3条随机游玩路径
   curse-checker playthrough script.txt -n 5 --seed 42
+  curse-checker explain script.txt node_id   # 解释节点可达性
+  curse-checker explain script.txt n1 n2 n3  # 解释多个节点
         """
     )
 
@@ -177,6 +214,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="随机种子，用于复现结果"
     )
     playthrough_parser.set_defaults(func=cmd_playthrough)
+
+    # explain 命令
+    explain_parser = subparsers.add_parser(
+        "explain",
+        help="解释指定节点的可达性，列出所有入口路线和诅咒状态"
+    )
+    explain_parser.add_argument("input", help="剧本文件或目录路径")
+    explain_parser.add_argument("node", nargs="+", help="要分析的节点ID（可多个）")
+    explain_parser.add_argument("-o", "--output", help="输出到文件")
+    explain_parser.set_defaults(func=cmd_explain)
 
     return parser
 
